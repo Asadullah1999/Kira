@@ -874,46 +874,58 @@
 
   
 
-  <!-- ── TRANSFORMERS.JS WAKE WORD ENGINE ── -->
-  <script type="module">
-    import { pipeline, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@3.4.0/dist/transformers.min.js';
+  
 
-    // Use local model files if available, otherwise fetch from HF
-    env.allowLocalModels = false;
+<!-- ── DEEPGRAM NOVA-2 WAKE WORD ENGINE ── -->
+  <script>
+    const DEEPGRAM_API_KEY = '1c9185a15aec3124dae710bc9b25b134e2936f0c';
+    const WAKE_PHRASES     = ['hey kira', 'hi kira', 'okay kira', 'a kira', 'hey kara', 'hey kera', 'hey kiera'];
+    const GATE_OPEN_MS     = 12000; // mic open for 12s after wake word
 
-    const WAKE_PHRASES   = ['hey kira', 'hi kira', 'okay kira'];
-    const CHUNK_MS       = 2000;   // record 2s chunks for fast detection
-    const SAMPLE_RATE    = 16000;
+    let didMicGated       = false;
+    let gateTimeout       = null;
+    let dgSocket          = null;
+    let micStream         = null;
+    let audioProcessor    = null;
+    let audioContext      = null;
+    let pendingGUMResolvers = [];
 
-    const statusDot    = document.getElementById('statusDot');
-    const statusText   = document.getElementById('statusText');
-    const latencyBadge = document.getElementById('latencyBadge');
-    const kiraLoading  = document.getElementById('kiraLoading');
+    const statusDot     = document.getElementById('statusDot');
+    const statusText    = document.getElementById('statusText');
+    const latencyBadge  = document.getElementById('latencyBadge');
+    const kiraLoading   = document.getElementById('kiraLoading');
     const wakeIndicator = document.getElementById('wakeIndicator');
+    const liveTranscript = document.getElementById('liveTranscript');
 
-    let transcriber  = null;
-    let micStream    = null;
-    let mediaRec     = null;
-    let didMicGated  = false;   // true = D-ID mic is live
-    let gateTimeout  = null;
-
-    // ── Status helper
+    // ── Helpers
     function setStatus(state, text, badge) {
-      statusDot.className = 'status-dot ' + state;
-      statusText.textContent = text;
-      if (badge !== undefined) latencyBadge.textContent = badge;
+      if (statusDot)    statusDot.className = 'status-dot ' + state;
+      if (statusText)   statusText.textContent = text;
+      if (badge !== undefined && latencyBadge) latencyBadge.textContent = badge;
     }
 
-    // ── Override getUserMedia so D-ID's mic is blocked by default
+    function setWake(triggered, msg) {
+      if (!wakeIndicator) return;
+      wakeIndicator.textContent = msg;
+      if (triggered) {
+        wakeIndicator.classList.add('triggered');
+      } else {
+        wakeIndicator.classList.remove('triggered');
+      }
+    }
+
+    function setTranscript(text) {
+      if (liveTranscript) liveTranscript.textContent = text || '—';
+    }
+
+    // ── getUserMedia override — blocks D-ID mic until gate opens
     const _origGUM = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-    let pendingGUMResolvers = [];
 
     navigator.mediaDevices.getUserMedia = function(constraints) {
       if (constraints && constraints.audio) {
         if (didMicGated) {
           return _origGUM(constraints);
         }
-        // Queue D-ID's request — resolve only on wake word
         return new Promise((resolve, reject) => {
           pendingGUMResolvers.push({ resolve, reject, constraints });
         });
@@ -921,125 +933,149 @@
       return _origGUM(constraints);
     };
 
-    // ── Release mic to D-ID for one turn
-    function releaseMicToDID() {
-      didMicGated = true;
-      setStatus('active', 'HEY KIRA DETECTED — MIC LIVE', '🎙️ LIVE');
-      if (wakeIndicator) {
-        wakeIndicator.classList.add('triggered');
-        wakeIndicator.textContent = '🟢 KIRA ACTIVATED';
-      }
+    // ── Open mic gate for D-ID
+    function openGate() {
+      if (didMicGated) {
+        // Already open — extend the window
+        clearTimeout(gateTimeout);
+      } else {
+        didMicGated = true;
+        setStatus('active', 'HEY KIRA DETECTED — MIC LIVE', '🎙️ LIVE');
+        setWake(true, '🟢 KIRA ACTIVATED — LISTENING');
 
-      // Flush any waiting D-ID getUserMedia calls
-      while (pendingGUMResolvers.length > 0) {
-        const { resolve, constraints } = pendingGUMResolvers.shift();
-        _origGUM(constraints).then(resolve);
-      }
-
-      // Auto-close gate after 12s (enough for one full response)
-      clearTimeout(gateTimeout);
-      gateTimeout = setTimeout(() => {
-        didMicGated = false;
-        setStatus('ready', 'LISTENING FOR "HEY KIRA"', '👂 AWAKE');
-        if (wakeIndicator) {
-          wakeIndicator.classList.remove('triggered');
-          wakeIndicator.textContent = '🔴 KIRA MUTED — SAY "HEY KIRA"';
+        // Flush any queued D-ID getUserMedia calls
+        while (pendingGUMResolvers.length > 0) {
+          const { resolve, constraints } = pendingGUMResolvers.shift();
+          _origGUM(constraints).then(resolve);
         }
-      }, 12000);
+      }
+
+      // Auto-close after GATE_OPEN_MS
+      clearTimeout(gateTimeout);
+      gateTimeout = setTimeout(closeGate, GATE_OPEN_MS);
     }
 
-    // ── Check transcript for wake phrase
+    function closeGate() {
+      didMicGated = false;
+      setStatus('ready', 'LISTENING FOR "HEY KIRA"', '👂 AWAKE');
+      setWake(false, '🔴 KIRA MUTED — SAY "HEY KIRA"');
+    }
+
+    // ── Check if transcript contains wake phrase
+    // Fuzzy-friendly: handles Indian accent variations
     function containsWake(text) {
-      const t = text.toLowerCase();
+      const t = text.toLowerCase().trim();
       return WAKE_PHRASES.some(p => t.includes(p));
     }
 
-    // ── Record audio chunks and run Whisper on each
-    async function startWakeWordLoop(stream) {
-      const audioCtx = new AudioContext({ sampleRate: SAMPLE_RATE });
-      const source   = audioCtx.createMediaStreamSource(stream);
-      const processor = audioCtx.createScriptProcessor(4096, 1, 1);
+    // ── Connect to Deepgram via WebSocket streaming
+    function connectDeepgram(stream) {
+      // Deepgram Nova-2 — streaming, Indian English optimised
+      const dgUrl = 'wss://api.deepgram.com/v1/listen?' + new URLSearchParams({
+        model:            'nova-2',
+        language:         'en-IN',      // Indian English model
+        punctuate:        'true',
+        interim_results:  'true',       // fast partial results for low latency
+        endpointing:      '300',        // ms of silence = utterance end
+        utterance_end_ms: '1000',
+        smart_format:     'true',
+        no_delay:         'true',       // lowest latency mode
+      });
 
-      let audioBuffer = [];
+      dgSocket = new WebSocket(dgUrl, ['token', DEEPGRAM_API_KEY]);
 
-      processor.onaudioprocess = (e) => {
-        const data = e.inputBuffer.getChannelData(0);
-        audioBuffer.push(...data);
+      dgSocket.onopen = () => {
+        setStatus('ready', 'LISTENING FOR "HEY KIRA"', '👂 AWAKE');
+        setWake(false, '🔴 KIRA MUTED — SAY "HEY KIRA"');
+        if (kiraLoading) kiraLoading.classList.add('hidden');
+        startStreaming(stream);
       };
 
-      source.connect(processor);
-      processor.connect(audioCtx.destination);
-
-      // Every CHUNK_MS, run Whisper on the buffered audio
-      setInterval(async () => {
-        if (!transcriber || audioBuffer.length === 0) return;
-
-        const chunk = new Float32Array(audioBuffer.splice(0, SAMPLE_RATE * (CHUNK_MS / 1000)));
-
+      dgSocket.onmessage = (event) => {
         try {
-          const result = await transcriber(chunk, {
-            sampling_rate: SAMPLE_RATE,
-            chunk_length_s: 2,
-            stride_length_s: 0.5,
-          });
+          const data = JSON.parse(event.data);
+          const alt  = data?.channel?.alternatives?.[0];
+          if (!alt) return;
 
-          const text = result?.text?.trim() || '';
-          if (text) {
-            console.log('[Whisper]', text);
-            // Update live transcript in UI
-            const liveEl = document.getElementById('liveTranscript');
-            if (liveEl) liveEl.textContent = text;
+          const transcript = alt.transcript?.trim();
+          const isFinal    = data.is_final;
 
-            if (containsWake(text) && !didMicGated) {
-              releaseMicToDID();
-            }
+          if (!transcript) return;
+
+          // Always show live transcript
+          setTranscript(transcript);
+
+          // Check for wake word on both interim and final
+          if (containsWake(transcript)) {
+            openGate();
           }
-        } catch(e) {
-          // Whisper errors are non-fatal — keep looping
-        }
-      }, CHUNK_MS);
+
+        } catch(e) {}
+      };
+
+      dgSocket.onerror = (e) => {
+        console.error('Deepgram error:', e);
+        setStatus('standby', 'STT ERROR — CHECK API KEY', '⚠️');
+      };
+
+      dgSocket.onclose = (e) => {
+        console.warn('Deepgram closed, reconnecting...', e.code);
+        // Auto-reconnect after 1s
+        setTimeout(() => connectDeepgram(stream), 1000);
+      };
     }
 
-    // ── Load Whisper tiny + request own mic for wake detection
+    // ── Stream raw PCM audio from mic to Deepgram WebSocket
+    function startStreaming(stream) {
+      audioContext  = new AudioContext({ sampleRate: 16000 });
+      const source  = audioContext.createMediaStreamSource(stream);
+      audioProcessor = audioContext.createScriptProcessor(2048, 1, 1);
+
+      audioProcessor.onaudioprocess = (e) => {
+        if (!dgSocket || dgSocket.readyState !== WebSocket.OPEN) return;
+
+        const float32 = e.inputBuffer.getChannelData(0);
+        // Convert Float32 → Int16 PCM (what Deepgram expects)
+        const int16 = new Int16Array(float32.length);
+        for (let i = 0; i < float32.length; i++) {
+          int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
+        }
+        dgSocket.send(int16.buffer);
+      };
+
+      source.connect(audioProcessor);
+      audioProcessor.connect(audioContext.destination);
+    }
+
+    // ── Init: get mic, connect Deepgram
     async function init() {
-      setStatus('standby', 'LOADING WHISPER MODEL...', '⏳ INIT');
+      setStatus('standby', 'REQUESTING MIC ACCESS...', '⏳');
 
       try {
-        // Load Whisper tiny.en — ~40MB, runs in browser
-        transcriber = await pipeline(
-          'automatic-speech-recognition',
-          'onnx-community/whisper-tiny.en',
-          { dtype: 'q8' }   // quantized = faster + smaller
-        );
+        // Get our own mic stream — separate from D-ID
+        micStream = await _origGUM({
+          audio: {
+            sampleRate:        16000,
+            channelCount:      1,
+            echoCancellation:  true,
+            noiseSuppression:  true,
+            autoGainControl:   true,
+          }
+        });
 
-        setStatus('standby', 'MODEL READY — REQUESTING MIC', '✅ LOADED');
-
-        // Get our OWN mic stream (separate from D-ID's)
-        micStream = await _origGUM({ audio: {
-          sampleRate: SAMPLE_RATE,
-          channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-        }});
-
-        await startWakeWordLoop(micStream);
-
-        // Hide loading overlay, show D-ID
-        if (kiraLoading) kiraLoading.classList.add('hidden');
-        setStatus('ready', 'LISTENING FOR "HEY KIRA"', '👂 AWAKE');
-        if (wakeIndicator) wakeIndicator.textContent = '🔴 KIRA MUTED — SAY "HEY KIRA"';
+        setStatus('standby', 'CONNECTING TO DEEPGRAM...', '⚡');
+        connectDeepgram(micStream);
 
       } catch(err) {
-        console.error('Wake word init failed:', err);
-        setStatus('standby', 'MIC ACCESS NEEDED', '⚠️ ERROR');
-        // Fallback — release mic to D-ID directly so it still works
+        console.error('Mic init failed:', err);
+        setStatus('standby', 'MIC ACCESS DENIED', '⚠️ ERROR');
+        // Fallback — release gate so D-ID still works
         didMicGated = true;
         if (kiraLoading) kiraLoading.classList.add('hidden');
       }
     }
 
-    // Start after page loads
-    window.addEventListener('load', () => setTimeout(init, 500));
+    window.addEventListener('load', () => setTimeout(init, 800));
   </script>
 
 <!-- ── D-ID AGENT EMBED ── -->
