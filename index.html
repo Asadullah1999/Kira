@@ -909,24 +909,21 @@
 
 
 
-<!-- ── WEB SPEECH API WAKE WORD ENGINE ── -->
-  <script>
-    // ═══════════════════════════════════════════════════════
-    // Uses Chrome's built-in Web Speech API (Google engine)
-    // Zero API keys. Works on GitHub Pages. Indian accent OK.
-    // ═══════════════════════════════════════════════════════
 
+
+<!-- ── WEB SPEECH API WAKE WORD ENGINE (Improved) ── -->
+  <script>
     const GATE_MS = 15000;
     const WAKE_PHRASES = [
       'hey kira', 'hi kira', 'okay kira', 'ok kira',
       'hey kara', 'hey keira', 'hey kiera', 'hey keera',
-      'a kira',   'ay kira'
+      'a kira', 'ay kira'
     ];
 
-    let recognition   = null;
-    let gateTimer     = null;
-    let lastWakeTime  = 0;
-    let isRunning     = false;
+    let recognition  = null;
+    let gateTimer    = null;
+    let lastWakeTime = 0;
+    let isRunning    = false;
 
     const elDot        = document.getElementById('statusDot');
     const elText       = document.getElementById('statusText');
@@ -987,8 +984,8 @@
     }
 
     function startRecognition() {
-      if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
-        setStatus('standby', 'USE CHROME BROWSER FOR WAKE WORD', '⚠️');
+      if (!('SpeechRecognition' in window || 'webkitSpeechRecognition' in window)) {
+        setStatus('standby', 'SPEECH RECOGNITION NOT SUPPORTED — USE CHROME', '⚠️');
         if (elLoading) elLoading.classList.add('hidden');
         return;
       }
@@ -996,65 +993,58 @@
       const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
       recognition = new SR();
 
-      // Indian English — 'en-IN' gives best results for Indian accents
-      recognition.lang           = 'en-IN';
-      recognition.continuous     = true;
-      recognition.interimResults = true;
-      recognition.maxAlternatives = 3;  // check multiple guesses for wake word
+      recognition.lang            = 'en-IN';
+      recognition.continuous      = true;
+      recognition.interimResults  = true;
+      recognition.maxAlternatives = 3;
 
       recognition.onstart = () => {
         isRunning = true;
         if (elLoading) elLoading.classList.add('hidden');
         setStatus('ready', 'LISTENING FOR "HEY KIRA"', '👂 AWAKE');
         setWake(false, '🔴 SAY "HEY KIRA" TO ACTIVATE KIRA');
-        console.log('[Speech] Recognition started');
+        console.log('[KIRA Speech] Started');
       };
 
       recognition.onresult = (event) => {
         for (let i = event.resultIndex; i < event.results.length; i++) {
-          // Check all alternatives — catches accent variations
           const result = event.results[i];
           for (let j = 0; j < result.length; j++) {
             const text = result[j].transcript.trim();
             if (!text) continue;
-
-            // Show latest transcript
-            if (j === 0) setLive(text);
-
+            if (j === 0) setLive(text);  // show primary transcript
             if (isWake(text)) {
               openGate();
-              break;
+              return;  // avoid multiple triggers
             }
           }
         }
       };
 
       recognition.onerror = (e) => {
-        console.warn('[Speech] Error:', e.error);
+        console.warn('[KIRA Speech] Error:', e.error);
         if (e.error === 'not-allowed') {
-          setStatus('standby', 'MIC ACCESS DENIED — ALLOW MIC & RELOAD', '⚠️');
-          setWake(false, '⚠️ MIC PERMISSION NEEDED');
-        } else if (e.error === 'no-speech') {
-          // Normal — just restart silently
+          setStatus('standby', 'MIC ACCESS DENIED — ALLOW & RELOAD', '⚠️');
+        } else if (e.error === 'no-speech' || e.error === 'aborted') {
+          // ignore — normal during silence
         } else {
-          setStatus('standby', 'SPEECH ERROR: ' + e.error, '⚠️');
+          setStatus('standby', 'SPEECH ERROR: ' + e.error.toUpperCase(), '⚠️');
         }
       };
 
       recognition.onend = () => {
         isRunning = false;
-        console.log('[Speech] Ended — restarting...');
-        // Always restart — keep listening continuously
+        // Auto-restart with small delay to avoid rapid loops
         setTimeout(() => {
           if (!isRunning) startRecognition();
-        }, 300);
+        }, 400);
       };
 
       try {
         recognition.start();
       } catch(e) {
-        console.warn('[Speech] Start failed:', e);
-        setTimeout(startRecognition, 1000);
+        console.warn('[KIRA Speech] Start failed, retrying...', e);
+        setTimeout(startRecognition, 800);
       }
     }
 
@@ -1062,7 +1052,7 @@
       setTimeout(() => {
         setStatus('standby', 'STARTING WAKE WORD ENGINE...', '⏳');
         startRecognition();
-      }, 1000);
+      }, 800);
     });
   </script>
 
