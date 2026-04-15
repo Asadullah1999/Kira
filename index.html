@@ -613,6 +613,10 @@
         <span class="status-latency" id="latencyBadge">⚡ WARMING UP...</span>
       </div>
 
+      <!-- Test button -->
+      <button onclick="testDeepgram()" class="test-btn" id="testBtn">🔌 TEST DEEPGRAM CONNECTION</button>
+      <div class="test-result" id="testResult"></div>
+
       <!-- Wake word indicator -->
       <div class="wake-indicator" id="wakeIndicator">🔴 KIRA MUTED — SAY "HEY KIRA"</div>
 
@@ -863,6 +867,31 @@
       white-space: nowrap;
     }
 
+
+    .test-btn {
+      font-family: 'Orbitron', monospace;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: 0.1em;
+      padding: 12px 28px;
+      background: transparent;
+      color: var(--kira-teal);
+      border: 1px solid var(--kira-teal);
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s ease;
+    }
+    .test-btn:hover { background: rgba(0,255,204,0.1); }
+    .test-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .test-result {
+      font-family: 'Space Mono', monospace;
+      font-size: 11px;
+      letter-spacing: 0.05em;
+      text-align: center;
+      min-height: 18px;
+      max-width: 700px;
+      word-break: break-all;
+    }
     .dots { animation: dotty 1.5s steps(3,end) infinite; }
     @keyframes dotty {
       0%   { content: '.'; }
@@ -884,7 +913,7 @@
 
 <!-- ── DEEPGRAM WAKE WORD ENGINE (Clean & Reliable) ── -->
   <script>
-    const DG_KEY  = '1c9185a15aec3124dae710bc9b25b134e2936f0c';
+    const DG_KEY  = '8890246f7237e3257ce03b94cebc120a3ebd92c8';
     const GATE_MS = 15000;
 
     const WAKE_PHRASES = [
@@ -1081,5 +1110,40 @@
 
   
 
+
+  <script>
+    async function testDeepgram() {
+      const btn = document.getElementById('testBtn');
+      const result = document.getElementById('testResult');
+      btn.textContent = '⏳ Testing...';
+      btn.disabled = true;
+      result.style.color = '#00d4ff';
+      result.textContent = 'Connecting to Deepgram...';
+
+      try {
+        const r = await fetch('https://api.deepgram.com/v1/projects', {
+          headers: { 'Authorization': 'Token 8890246f7237e3257ce03b94cebc120a3ebd92c8' }
+        });
+        const data = await r.json();
+
+        if (data.projects || data.project_id) {
+          result.style.color = '#00ffcc';
+          result.textContent = '✅ KEY WORKS! Deepgram connected. Projects: ' + JSON.stringify(data).slice(0, 80);
+        } else if (data.err_msg || data.message) {
+          result.style.color = '#ff4444';
+          result.textContent = '❌ ERROR: ' + (data.err_msg || data.message);
+        } else {
+          result.style.color = '#ffaa00';
+          result.textContent = '⚠️ RESPONSE: ' + JSON.stringify(data).slice(0, 120);
+        }
+      } catch(e) {
+        result.style.color = '#ff4444';
+        result.textContent = '❌ FAILED: ' + e.message;
+      }
+
+      btn.textContent = '🔌 TEST DEEPGRAM CONNECTION';
+      btn.disabled = false;
+    }
+  </script>
 </body>
 </html>
