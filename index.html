@@ -613,10 +613,6 @@
         <span class="status-latency" id="latencyBadge">⚡ WARMING UP...</span>
       </div>
 
-      <!-- Test button -->
-      <button onclick="testDeepgram()" class="test-btn" id="testBtn">🔌 TEST DEEPGRAM CONNECTION</button>
-      <div class="test-result" id="testResult"></div>
-
       <!-- Wake word indicator -->
       <div class="wake-indicator" id="wakeIndicator">🔴 KIRA MUTED — SAY "HEY KIRA"</div>
 
@@ -911,23 +907,26 @@
 
 
 
-<!-- ── DEEPGRAM WAKE WORD ENGINE (Clean & Reliable) ── -->
-  <script>
-    const DG_KEY  = '8890246f7237e3257ce03b94cebc120a3ebd92c8';
-    const GATE_MS = 15000;
 
+
+<!-- ── WEB SPEECH API WAKE WORD ENGINE ── -->
+  <script>
+    // ═══════════════════════════════════════════════════════
+    // Uses Chrome's built-in Web Speech API (Google engine)
+    // Zero API keys. Works on GitHub Pages. Indian accent OK.
+    // ═══════════════════════════════════════════════════════
+
+    const GATE_MS = 15000;
     const WAKE_PHRASES = [
       'hey kira', 'hi kira', 'okay kira', 'ok kira',
       'hey kara', 'hey keira', 'hey kiera', 'hey keera',
       'a kira',   'ay kira'
     ];
 
-    let dgSocket      = null;
-    let micStream     = null;
-    let audioCtx      = null;
-    let processor     = null;
+    let recognition   = null;
     let gateTimer     = null;
     let lastWakeTime  = 0;
+    let isRunning     = false;
 
     const elDot        = document.getElementById('statusDot');
     const elText       = document.getElementById('statusText');
@@ -987,114 +986,84 @@
       }
     }
 
-    function connectDG() {
-      const params = new URLSearchParams({
-        model:            'nova-2',
-        language:         'en-IN',
-        interim_results:  'true',
-        endpointing:      '200',
-        utterance_end_ms: '800',
-        no_delay:         'true',
-        encoding:         'linear16',
-        sample_rate:      '16000',
-        channels:         '1',
-      });
+    function startRecognition() {
+      if (!('webkitSpeechRecognition' in window || 'SpeechRecognition' in window)) {
+        setStatus('standby', 'USE CHROME BROWSER FOR WAKE WORD', '⚠️');
+        if (elLoading) elLoading.classList.add('hidden');
+        return;
+      }
 
-      // Pass API key as query param — subprotocol method fails on GitHub Pages HTTPS
-      params.append('token', DG_KEY);
-      dgSocket = new WebSocket('wss://api.deepgram.com/v1/listen?' + params.toString());
-      dgSocket.binaryType = 'arraybuffer';
+      const SR = window.SpeechRecognition || window.webkitSpeechRecognition;
+      recognition = new SR();
 
-      dgSocket.onopen = () => {
-        console.log('[Deepgram] Connected');
+      // Indian English — 'en-IN' gives best results for Indian accents
+      recognition.lang           = 'en-IN';
+      recognition.continuous     = true;
+      recognition.interimResults = true;
+      recognition.maxAlternatives = 3;  // check multiple guesses for wake word
+
+      recognition.onstart = () => {
+        isRunning = true;
+        if (elLoading) elLoading.classList.add('hidden');
         setStatus('ready', 'LISTENING FOR "HEY KIRA"', '👂 AWAKE');
         setWake(false, '🔴 SAY "HEY KIRA" TO ACTIVATE KIRA');
-        if (elLoading) elLoading.classList.add('hidden');
-        pumpAudio();
+        console.log('[Speech] Recognition started');
       };
 
-      dgSocket.onmessage = (e) => {
-        try {
-          const data = JSON.parse(e.data);
-          const alt  = data?.channel?.alternatives?.[0];
-          if (!alt?.transcript) return;
-          const text = alt.transcript.trim();
-          if (text) {
-            setLive(text);
-            if (isWake(text)) openGate();
+      recognition.onresult = (event) => {
+        for (let i = event.resultIndex; i < event.results.length; i++) {
+          // Check all alternatives — catches accent variations
+          const result = event.results[i];
+          for (let j = 0; j < result.length; j++) {
+            const text = result[j].transcript.trim();
+            if (!text) continue;
+
+            // Show latest transcript
+            if (j === 0) setLive(text);
+
+            if (isWake(text)) {
+              openGate();
+              break;
+            }
           }
-        } catch(_) {}
-      };
-
-      dgSocket.onerror = () => setStatus('standby', 'CONNECTION ERROR', '⚠️');
-
-      dgSocket.onclose = (e) => {
-        stopPump();
-        if (e.code === 1008 || e.code === 1003) {
-          setStatus('standby', 'AUTH FAILED — CHECK DEEPGRAM KEY', '❌');
-          return;
         }
-        // Exponential backoff reconnect
-        const delay = Math.min(10000, 1000 * Math.pow(1.5, Math.random() * 4));
-        console.warn('[Deepgram] Closed, reconnecting in', Math.round(delay), 'ms');
-        setTimeout(connectDG, delay);
       };
-    }
 
-    function pumpAudio() {
-      if (!micStream || audioCtx) return;
-      audioCtx      = new AudioContext({ sampleRate: 16000 });
-      const source  = audioCtx.createMediaStreamSource(micStream);
-      processor     = audioCtx.createScriptProcessor(4096, 1, 1);
-
-      processor.onaudioprocess = (e) => {
-        if (dgSocket?.readyState !== WebSocket.OPEN) return;
-        const f32 = e.inputBuffer.getChannelData(0);
-        const i16 = new Int16Array(f32.length);
-        for (let i = 0; i < f32.length; i++) {
-          i16[i] = Math.max(-32768, Math.min(32767, f32[i] * 32768));
+      recognition.onerror = (e) => {
+        console.warn('[Speech] Error:', e.error);
+        if (e.error === 'not-allowed') {
+          setStatus('standby', 'MIC ACCESS DENIED — ALLOW MIC & RELOAD', '⚠️');
+          setWake(false, '⚠️ MIC PERMISSION NEEDED');
+        } else if (e.error === 'no-speech') {
+          // Normal — just restart silently
+        } else {
+          setStatus('standby', 'SPEECH ERROR: ' + e.error, '⚠️');
         }
-        dgSocket.send(i16.buffer);
       };
 
-      source.connect(processor);
-      processor.connect(audioCtx.destination);
-    }
+      recognition.onend = () => {
+        isRunning = false;
+        console.log('[Speech] Ended — restarting...');
+        // Always restart — keep listening continuously
+        setTimeout(() => {
+          if (!isRunning) startRecognition();
+        }, 300);
+      };
 
-    function stopPump() {
-      try { processor?.disconnect(); } catch(_) {}
-      try { audioCtx?.close();       } catch(_) {}
-      processor = null;
-      audioCtx  = null;
-    }
-
-    window.addEventListener('beforeunload', () => {
-      dgSocket?.close();
-      stopPump();
-      micStream?.getTracks().forEach(t => t.stop());
-    });
-
-    async function init() {
-      setStatus('standby', 'REQUESTING MICROPHONE...', '⏳');
       try {
-        micStream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            sampleRate:       16000,
-            channelCount:     1,
-            echoCancellation: true,
-            noiseSuppression: true,
-            autoGainControl:  true,
-          }
-        });
-        connectDG();
-      } catch(err) {
-        console.error('[Init] Mic denied:', err);
-        setStatus('standby', 'MICROPHONE ACCESS DENIED — ALLOW & RELOAD', '⚠️');
-        if (elLoading) elLoading.classList.add('hidden');
+        recognition.start();
+      } catch(e) {
+        console.warn('[Speech] Start failed:', e);
+        setTimeout(startRecognition, 1000);
       }
     }
 
-    window.addEventListener('load', () => setTimeout(init, 800));
+    window.addEventListener('load', () => {
+      setTimeout(() => {
+        setStatus('standby', 'STARTING WAKE WORD ENGINE...', '⏳');
+        startRecognition();
+      }, 1000);
+    });
   </script>
 
 <!-- ── D-ID AGENT EMBED ── -->
@@ -1111,39 +1080,5 @@
   
 
 
-  <script>
-    async function testDeepgram() {
-      const btn = document.getElementById('testBtn');
-      const result = document.getElementById('testResult');
-      btn.textContent = '⏳ Testing...';
-      btn.disabled = true;
-      result.style.color = '#00d4ff';
-      result.textContent = 'Connecting to Deepgram...';
-
-      try {
-        const r = await fetch('https://api.deepgram.com/v1/projects', {
-          headers: { 'Authorization': 'Token 8890246f7237e3257ce03b94cebc120a3ebd92c8' }
-        });
-        const data = await r.json();
-
-        if (data.projects || data.project_id) {
-          result.style.color = '#00ffcc';
-          result.textContent = '✅ KEY WORKS! Deepgram connected. Projects: ' + JSON.stringify(data).slice(0, 80);
-        } else if (data.err_msg || data.message) {
-          result.style.color = '#ff4444';
-          result.textContent = '❌ ERROR: ' + (data.err_msg || data.message);
-        } else {
-          result.style.color = '#ffaa00';
-          result.textContent = '⚠️ RESPONSE: ' + JSON.stringify(data).slice(0, 120);
-        }
-      } catch(e) {
-        result.style.color = '#ff4444';
-        result.textContent = '❌ FAILED: ' + e.message;
-      }
-
-      btn.textContent = '🔌 TEST DEEPGRAM CONNECTION';
-      btn.disabled = false;
-    }
-  </script>
 </body>
 </html>
