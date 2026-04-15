@@ -640,7 +640,7 @@
   <!-- ── FOOTER ── -->
   <footer>
     <div class="footer-logo">KIRA</div>
-    <div class="footer-text">© 2025 Kaar Technologies Inc. · Powered by D-ID & Anthropic AI · Built for SAP Excellence</div>
+    <div class="footer-text">© 2026 Kaar Technologies Inc. · Powered by D-ID & Anthropic AI · Built for SAP Excellence</div>
   </footer>
 
   <!-- ── STYLES FOR CONTROLS ── -->
@@ -876,202 +876,193 @@
 
   
 
-<!-- ── DEEPGRAM NOVA-2 WAKE WORD ENGINE ── -->
+
+
+
+
+
+
+<!-- ── DEEPGRAM WAKE WORD ENGINE (Clean & Reliable) ── -->
   <script>
-    const DEEPGRAM_API_KEY = '1c9185a15aec3124dae710bc9b25b134e2936f0c';
-    const WAKE_PHRASES     = ['hey kira', 'hi kira', 'okay kira', 'a kira', 'hey kara', 'hey kera', 'hey kiera'];
-    const GATE_OPEN_MS     = 12000; // mic open for 12s after wake word
+    const DG_KEY  = '1c9185a15aec3124dae710bc9b25b134e2936f0c';
+    const GATE_MS = 15000;
 
-    let didMicGated       = false;
-    let gateTimeout       = null;
-    let dgSocket          = null;
-    let micStream         = null;
-    let audioProcessor    = null;
-    let audioContext      = null;
-    let pendingGUMResolvers = [];
+    const WAKE_PHRASES = [
+      'hey kira', 'hi kira', 'okay kira', 'ok kira',
+      'hey kara', 'hey keira', 'hey kiera', 'hey keera',
+      'a kira',   'ay kira'
+    ];
 
-    const statusDot     = document.getElementById('statusDot');
-    const statusText    = document.getElementById('statusText');
-    const latencyBadge  = document.getElementById('latencyBadge');
-    const kiraLoading   = document.getElementById('kiraLoading');
-    const wakeIndicator = document.getElementById('wakeIndicator');
-    const liveTranscript = document.getElementById('liveTranscript');
+    let dgSocket      = null;
+    let micStream     = null;
+    let audioCtx      = null;
+    let processor     = null;
+    let gateTimer     = null;
+    let lastWakeTime  = 0;
 
-    // ── Helpers
-    function setStatus(state, text, badge) {
-      if (statusDot)    statusDot.className = 'status-dot ' + state;
-      if (statusText)   statusText.textContent = text;
-      if (badge !== undefined && latencyBadge) latencyBadge.textContent = badge;
+    const elDot        = document.getElementById('statusDot');
+    const elText       = document.getElementById('statusText');
+    const elBadge      = document.getElementById('latencyBadge');
+    const elLoading    = document.getElementById('kiraLoading');
+    const elWake       = document.getElementById('wakeIndicator');
+    const elTranscript = document.getElementById('liveTranscript');
+
+    function setStatus(cls, text, badge) {
+      if (elDot)  elDot.className = 'status-dot ' + cls;
+      if (elText) elText.textContent = text;
+      if (elBadge && badge !== undefined) elBadge.textContent = badge;
     }
 
-    function setWake(triggered, msg) {
-      if (!wakeIndicator) return;
-      wakeIndicator.textContent = msg;
-      if (triggered) {
-        wakeIndicator.classList.add('triggered');
-      } else {
-        wakeIndicator.classList.remove('triggered');
-      }
+    function setWake(on, msg) {
+      if (!elWake) return;
+      elWake.textContent = msg;
+      on ? elWake.classList.add('triggered') : elWake.classList.remove('triggered');
     }
 
-    function setTranscript(text) {
-      if (liveTranscript) liveTranscript.textContent = text || '—';
+    function setLive(t) {
+      if (elTranscript) elTranscript.textContent = t || '—';
     }
 
-    // ── getUserMedia override — blocks D-ID mic until gate opens
-    const _origGUM = navigator.mediaDevices.getUserMedia.bind(navigator.mediaDevices);
-
-    navigator.mediaDevices.getUserMedia = function(constraints) {
-      if (constraints && constraints.audio) {
-        if (didMicGated) {
-          return _origGUM(constraints);
-        }
-        return new Promise((resolve, reject) => {
-          pendingGUMResolvers.push({ resolve, reject, constraints });
-        });
-      }
-      return _origGUM(constraints);
-    };
-
-    // ── Open mic gate for D-ID
-    function openGate() {
-      if (didMicGated) {
-        // Already open — extend the window
-        clearTimeout(gateTimeout);
-      } else {
-        didMicGated = true;
-        setStatus('active', 'HEY KIRA DETECTED — MIC LIVE', '🎙️ LIVE');
-        setWake(true, '🟢 KIRA ACTIVATED — LISTENING');
-
-        // Flush any queued D-ID getUserMedia calls
-        while (pendingGUMResolvers.length > 0) {
-          const { resolve, constraints } = pendingGUMResolvers.shift();
-          _origGUM(constraints).then(resolve);
-        }
-      }
-
-      // Auto-close after GATE_OPEN_MS
-      clearTimeout(gateTimeout);
-      gateTimeout = setTimeout(closeGate, GATE_OPEN_MS);
-    }
-
-    function closeGate() {
-      didMicGated = false;
-      setStatus('ready', 'LISTENING FOR "HEY KIRA"', '👂 AWAKE');
-      setWake(false, '🔴 KIRA MUTED — SAY "HEY KIRA"');
-    }
-
-    // ── Check if transcript contains wake phrase
-    // Fuzzy-friendly: handles Indian accent variations
-    function containsWake(text) {
-      const t = text.toLowerCase().trim();
+    function isWake(text) {
+      const t = text.toLowerCase().replace(/[.,!?]/g, '').trim();
       return WAKE_PHRASES.some(p => t.includes(p));
     }
 
-    // ── Connect to Deepgram via WebSocket streaming
-    function connectDeepgram(stream) {
-      // Deepgram Nova-2 — streaming, Indian English optimised
-      const dgUrl = 'wss://api.deepgram.com/v1/listen?' + new URLSearchParams({
+    function openGate() {
+      const now = Date.now();
+      if (now - lastWakeTime < 2000) return;
+      lastWakeTime = now;
+
+      setStatus('active', 'HEY KIRA DETECTED — SHE IS LISTENING', '🎙️ LIVE');
+      setWake(true, '🟢 KIRA ACTIVATED — SPEAK YOUR QUESTION');
+
+      const frame = document.querySelector('.kira-frame-wrap');
+      if (frame) {
+        frame.style.transition  = 'all 0.4s ease';
+        frame.style.boxShadow   = '0 0 80px rgba(0,255,204,0.6)';
+        frame.style.borderColor = 'rgba(0,255,204,0.8)';
+      }
+
+      clearTimeout(gateTimer);
+      gateTimer = setTimeout(closeGate, GATE_MS);
+    }
+
+    function closeGate() {
+      setStatus('ready', 'LISTENING FOR "HEY KIRA"', '👂 AWAKE');
+      setWake(false, '🔴 SAY "HEY KIRA" TO ACTIVATE KIRA');
+
+      const frame = document.querySelector('.kira-frame-wrap');
+      if (frame) {
+        frame.style.boxShadow   = '0 0 60px rgba(0,212,255,0.15)';
+        frame.style.borderColor = 'rgba(0,212,255,0.3)';
+      }
+    }
+
+    function connectDG() {
+      const params = new URLSearchParams({
         model:            'nova-2',
-        language:         'en-IN',      // Indian English model
-        punctuate:        'true',
-        interim_results:  'true',       // fast partial results for low latency
-        endpointing:      '300',        // ms of silence = utterance end
-        utterance_end_ms: '1000',
-        smart_format:     'true',
-        no_delay:         'true',       // lowest latency mode
+        language:         'en-IN',
+        interim_results:  'true',
+        endpointing:      '200',
+        utterance_end_ms: '800',
+        no_delay:         'true',
+        encoding:         'linear16',
+        sample_rate:      '16000',
+        channels:         '1',
       });
 
-      dgSocket = new WebSocket(dgUrl, ['token', DEEPGRAM_API_KEY]);
+      dgSocket = new WebSocket(
+        'wss://api.deepgram.com/v1/listen?' + params.toString(),
+        ['token', DG_KEY]
+      );
+      dgSocket.binaryType = 'arraybuffer';
 
       dgSocket.onopen = () => {
+        console.log('[Deepgram] Connected');
         setStatus('ready', 'LISTENING FOR "HEY KIRA"', '👂 AWAKE');
-        setWake(false, '🔴 KIRA MUTED — SAY "HEY KIRA"');
-        if (kiraLoading) kiraLoading.classList.add('hidden');
-        startStreaming(stream);
+        setWake(false, '🔴 SAY "HEY KIRA" TO ACTIVATE KIRA');
+        if (elLoading) elLoading.classList.add('hidden');
+        pumpAudio();
       };
 
-      dgSocket.onmessage = (event) => {
+      dgSocket.onmessage = (e) => {
         try {
-          const data = JSON.parse(event.data);
+          const data = JSON.parse(e.data);
           const alt  = data?.channel?.alternatives?.[0];
-          if (!alt) return;
-
-          const transcript = alt.transcript?.trim();
-          const isFinal    = data.is_final;
-
-          if (!transcript) return;
-
-          // Always show live transcript
-          setTranscript(transcript);
-
-          // Check for wake word on both interim and final
-          if (containsWake(transcript)) {
-            openGate();
+          if (!alt?.transcript) return;
+          const text = alt.transcript.trim();
+          if (text) {
+            setLive(text);
+            if (isWake(text)) openGate();
           }
-
-        } catch(e) {}
+        } catch(_) {}
       };
 
-      dgSocket.onerror = (e) => {
-        console.error('Deepgram error:', e);
-        setStatus('standby', 'STT ERROR — CHECK API KEY', '⚠️');
-      };
+      dgSocket.onerror = () => setStatus('standby', 'CONNECTION ERROR', '⚠️');
 
       dgSocket.onclose = (e) => {
-        console.warn('Deepgram closed, reconnecting...', e.code);
-        // Auto-reconnect after 1s
-        setTimeout(() => connectDeepgram(stream), 1000);
-      };
-    }
-
-    // ── Stream raw PCM audio from mic to Deepgram WebSocket
-    function startStreaming(stream) {
-      audioContext  = new AudioContext({ sampleRate: 16000 });
-      const source  = audioContext.createMediaStreamSource(stream);
-      audioProcessor = audioContext.createScriptProcessor(2048, 1, 1);
-
-      audioProcessor.onaudioprocess = (e) => {
-        if (!dgSocket || dgSocket.readyState !== WebSocket.OPEN) return;
-
-        const float32 = e.inputBuffer.getChannelData(0);
-        // Convert Float32 → Int16 PCM (what Deepgram expects)
-        const int16 = new Int16Array(float32.length);
-        for (let i = 0; i < float32.length; i++) {
-          int16[i] = Math.max(-32768, Math.min(32767, float32[i] * 32768));
+        stopPump();
+        if (e.code === 1008 || e.code === 1003) {
+          setStatus('standby', 'AUTH FAILED — CHECK DEEPGRAM KEY', '❌');
+          return;
         }
-        dgSocket.send(int16.buffer);
+        // Exponential backoff reconnect
+        const delay = Math.min(10000, 1000 * Math.pow(1.5, Math.random() * 4));
+        console.warn('[Deepgram] Closed, reconnecting in', Math.round(delay), 'ms');
+        setTimeout(connectDG, delay);
       };
-
-      source.connect(audioProcessor);
-      audioProcessor.connect(audioContext.destination);
     }
 
-    // ── Init: get mic, connect Deepgram
-    async function init() {
-      setStatus('standby', 'REQUESTING MIC ACCESS...', '⏳');
+    function pumpAudio() {
+      if (!micStream || audioCtx) return;
+      audioCtx      = new AudioContext({ sampleRate: 16000 });
+      const source  = audioCtx.createMediaStreamSource(micStream);
+      processor     = audioCtx.createScriptProcessor(4096, 1, 1);
 
+      processor.onaudioprocess = (e) => {
+        if (dgSocket?.readyState !== WebSocket.OPEN) return;
+        const f32 = e.inputBuffer.getChannelData(0);
+        const i16 = new Int16Array(f32.length);
+        for (let i = 0; i < f32.length; i++) {
+          i16[i] = Math.max(-32768, Math.min(32767, f32[i] * 32768));
+        }
+        dgSocket.send(i16.buffer);
+      };
+
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+    }
+
+    function stopPump() {
+      try { processor?.disconnect(); } catch(_) {}
+      try { audioCtx?.close();       } catch(_) {}
+      processor = null;
+      audioCtx  = null;
+    }
+
+    window.addEventListener('beforeunload', () => {
+      dgSocket?.close();
+      stopPump();
+      micStream?.getTracks().forEach(t => t.stop());
+    });
+
+    async function init() {
+      setStatus('standby', 'REQUESTING MICROPHONE...', '⏳');
       try {
-        // Get our own mic stream — separate from D-ID
-        micStream = await _origGUM({
+        micStream = await navigator.mediaDevices.getUserMedia({
           audio: {
-            sampleRate:        16000,
-            channelCount:      1,
-            echoCancellation:  true,
-            noiseSuppression:  true,
-            autoGainControl:   true,
+            sampleRate:       16000,
+            channelCount:     1,
+            echoCancellation: true,
+            noiseSuppression: true,
+            autoGainControl:  true,
           }
         });
-
-        setStatus('standby', 'CONNECTING TO DEEPGRAM...', '⚡');
-        connectDeepgram(micStream);
-
+        connectDG();
       } catch(err) {
-        console.error('Mic init failed:', err);
-        setStatus('standby', 'MIC ACCESS DENIED', '⚠️ ERROR');
-        // Fallback — release gate so D-ID still works
-        didMicGated = true;
-        if (kiraLoading) kiraLoading.classList.add('hidden');
+        console.error('[Init] Mic denied:', err);
+        setStatus('standby', 'MICROPHONE ACCESS DENIED — ALLOW & RELOAD', '⚠️');
+        if (elLoading) elLoading.classList.add('hidden');
       }
     }
 
