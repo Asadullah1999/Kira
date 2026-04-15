@@ -971,10 +971,9 @@
         channels:         '1',
       });
 
-      dgSocket = new WebSocket(
-        'wss://api.deepgram.com/v1/listen?' + params.toString(),
-        ['token', DG_KEY]
-      );
+      // Pass API key as query param — subprotocol method fails on GitHub Pages HTTPS
+      params.append('token', DG_KEY);
+      dgSocket = new WebSocket('wss://api.deepgram.com/v1/listen?' + params.toString());
       dgSocket.binaryType = 'arraybuffer';
 
       dgSocket.onopen = () => {
